@@ -3,11 +3,13 @@ package main
 import (
     "log"
     "os"
+    "fmt"
     "io/ioutil"
     "net/http"
     "encoding/json"
     "github.com/emicklei/go-restful"
     "github.com/emicklei/go-restful-swagger12"
+    "github.com/google/uuid"
 )
 
 // This example is functionally the same as the example in restful-user-resource.go
@@ -25,14 +27,18 @@ type UserService struct {
     users map[string]User
 }
 
-func (u UserService) Register() {
+func (u UserService) nextId() string {
+    return uuid.New().String()
+}
+
+func (u UserService) RegisterTo(container *restful.Container) {
     ws := new(restful.WebService)
     ws.
         Path("/users").
         Consumes(restful.MIME_XML, restful.MIME_JSON).
         Produces(restful.MIME_JSON, restful.MIME_XML) // you can specify this per route as well
 
-    ws.Route(ws.GET("/").To(u.findAllUsers).
+    ws.Route(ws.GET("").To(u.findAllUsers).
         // docs
         Doc("get all users").
         Operation("findAllUsers").
@@ -66,7 +72,7 @@ func (u UserService) Register() {
         Operation("removeUser").
         Param(ws.PathParameter("user-id", "identifier of the user").DataType("string")))
 
-    restful.Add(ws)
+    container.Add(ws)
 }
 
 // GET http://localhost:8080/users
@@ -76,6 +82,9 @@ func (u UserService) findAllUsers(request *restful.Request, response *restful.Re
     for _, each := range u.users {
         list = append(list, each)
     }
+    userCount := len(list)
+    contentRange := fmt.Sprintf("users 0-%d/%d", userCount, userCount)
+    response.AddHeader("Content-Range", contentRange)
     response.WriteEntity(list)
 }
 
@@ -114,7 +123,7 @@ func (u *UserService) updateUser(request *restful.Request, response *restful.Res
 // <User><Id>1</Id><Name>Melissa</Name></User>
 //
 func (u *UserService) createUser(request *restful.Request, response *restful.Response) {
-    usr := User{}
+    usr := User{Id: u.nextId()}
     err := request.ReadEntity(&usr)
     if err == nil {
         u.users[usr.Id] = usr
@@ -145,7 +154,7 @@ func (u *UserService) Load() error {
     if err != nil {
         return err
     }
-    err = json.Unmarshal(content, u.users)
+    err = json.Unmarshal(content, &u.users)
     if err != nil {
         return err
     }
@@ -166,13 +175,25 @@ func (u *UserService) Save() error {
 
 func main() {
     path := "./data.json"
+
+    wsContainer := restful.NewContainer()
     u := UserService{path, map[string]User{}}
+
     err := u.Load()
     if err != nil {
         log.Printf("fail to load %s", path)
         log.Printf("error: %s", err)
     }
-    u.Register()
+    u.RegisterTo(wsContainer)
+
+    // Add container filter to enable CORS
+    cors := restful.CrossOriginResourceSharing{
+        ExposeHeaders:  []string{"Content-Range"},
+        AllowedHeaders: []string{"Content-Type", "Accept"},
+        AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+        CookiesAllowed: true,
+        Container:      wsContainer}
+    wsContainer.Filter(cors.Filter)
 
     // Optionally, you can install the Swagger Service which provides a nice Web UI on your REST API
     // You need to download the Swagger HTML5 assets and change the FilePath location in the config below.
@@ -188,5 +209,6 @@ func main() {
     swagger.InstallSwaggerService(config)
 
     log.Printf("start listening on localhost:8080")
-    log.Fatal(http.ListenAndServe(":8080", nil))
+    server := &http.Server{Addr: ":8080", Handler: wsContainer}
+    log.Fatal(server.ListenAndServe())
 }
